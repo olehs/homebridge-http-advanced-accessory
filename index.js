@@ -101,46 +101,39 @@ function JPathMapper(parameters) {
 }
 
 function HttpAdvancedAccessory(log, config) {
-	this.log = log;
-	this.name = config.name;
-	this.service = config.service;
-	this.optionCharacteristic = config.optionCharacteristic || [];
-	this.forceRefreshDelay = config.forceRefreshDelay || 0;
-	this.enableSet = true;
-	this.statusEmitters = [];
-	this.state = {};
-	// process the mappers
 	var self = this;
+
+	self.log = log;
 	self.debug = config.debug;
-	/**
-	 * self.urls ={
-	 *	getStatus : {
-	 *		url:"http://",
-	 *		httpMethod:"",
-	 *		mappers : [],
-	 *      inconclusive : {
-	 * 			url:
-	 * 			httpMethods:"",
-	 * 			mappers[]
-	 * 		}
-	 *	},
-	 *	getTemp : {
-	 *		url:"http://",
-	 *		httpMethod:"",
-	 *		mappers : []
-	 *	},
-	 *  setTemp : {
-	 * 		url:"http://{value}",
-	 * 		httpMethod:"",
-	 *      body:"{value}",
-	 * 		mappers : []
-	 * }
-	 *}
-	 */
-	function createAction(action, actionDescription){
+	
+	self.name = config.name;
+	self.services = config.services;
+	self.forceRefreshDelay = config.forceRefreshDelay;
+
+	self.auth = {
+		username: config.username || "",
+		password: config.password || "",
+		immediately: true
+	};
+
+	if ("immediately" in config) {
+		self.auth.immediately = config.immediately;
+	}
+
+	self.createAction = function (actionDescription) {
+		var action = {};
+
+		if (!(actionDescription instanceof Object)) {
+			action.url = actionDescription;
+			action.httpMethod = "GET";
+			action.body = "";
+			return action;
+		}
+
 		action.url = actionDescription.url;
 		action.httpMethod = actionDescription.httpMethod || "GET";
 		action.body = actionDescription.body || "";
+
 		if (actionDescription.mappers) {
 			action.mappers = [];
 			actionDescription.mappers.forEach(function(matches) {
@@ -160,30 +153,17 @@ function HttpAdvancedAccessory(log, config) {
 				}
 			});
 		}
-		if(actionDescription.inconclusive){
-			action.inconclusive = {};
-			createAction(action.inconclusive, actionDescription.inconclusive);
-		}
-	};
-	self.urls ={};
-	if(config.urls){
-		for (var actionName in config.urls){
-			if(!config.urls.hasOwnProperty(actionName)) continue;
-			self.urls[actionName] = {};
-			createAction(self.urls[actionName],config.urls[actionName]);
+
+		if(actionDescription.inconclusive) {
+			action.inconclusive = createAction(actionDescription.inconclusive);
 		}
 
-	}
-	self.auth = {
-		username: config.username || "",
-		password: config.password || "",
-		immediately: true
+		return action;
 	};
 
-	if ("immediately" in config) {
-		self.auth.immediately = config.immediately;
+	if ("identify" in config) {
+		self.identifyAction = self.createAction(config.identify);
 	}
-
 
 }
 
@@ -276,205 +256,190 @@ HttpAdvancedAccessory.prototype = {
 	//Start
 	identify: function (callback) {
 		this.log("Identify requested!");
-		callback(null);
+		this.getDispatch(callback, this.identifyAction);
 	},
+
 	getName: function (callback) {
 		this.log("getName :", this.name);
 		var error = null;
 		callback(error, this.name);
 	},
-	
-	getServices: function () {
-		var getDispatch = function (callback, action) {
-			if (!action) {
-				callback(null);
+
+	createService: function (service) {
+		var newService = null;
+
+		var enableSet = true;
+		var statusEmitters = {};
+		var actions = {};
+
+		if(service.characteristic) {
+			for (var actionName in service.characteristic) {
+				actions[actionName] = this.createAction(service.characteristic[actionName]);
 			}
-			this.httpRequest(action.url, action.body, action.httpMethod, function(error, response, responseBody) {
-				if (error) {
-					this.log("GetState function failed: %s", error.message);
-					callback(error);
-				} else {
-					var state = responseBody;
-					state = this.applyMappers(action.mappers,state);
-					if(state == "inconclusive" && action.inconclusive){
-						getDispatch(callback,action.inconclusive);
-					}else{
-						callback(null, parseInt(state));
-					}
-				}
-			}.bind(this));
-
-		}.bind(this);
-
-		var setDispatch = function (value, callback, characteristic) {
-			if (this.enableSet == false) { callback() }
-			else {
-				var actionName = "set" + characteristic.displayName.replace(/\s/g, '')
-				this.debugLog("setDispatch:actionName:value: ", actionName, value); 
-				var action = this.urls[actionName];
-				if (!action || !action.url) {
-					callback(null);
-				}
-				var state = this.state;
-				var body = action.body;
-				var mappedValue = this.applyMappers(action.mappers, value);
-				var url = eval('`'+action.url+'`').replace(/{value}/gi, mappedValue);
-				if (body) {
-					body = eval('`'+body+'`').replace(/{value}/gi, mappedValue);
-				}
-
-				this.httpRequest(url, body, action.httpMethod, function(error, response, responseBody) {
-					if (error) {
-						this.log("GetState function failed: %s", error.message);
-						callback(error);
-					} else {
-						callback(null, value);
-					}
-				}.bind(this));
-
-			}
-		}.bind(this);
-
-		// you can OPTIONALLY create an information service if you wish to override / the default values for things like serial number, model, etc.
-		var informationService = new Service.AccessoryInformation();
-
-		informationService
-			.setCharacteristic(Characteristic.Manufacturer, "Custom Manufacturer")
-			.setCharacteristic(Characteristic.Model, "HTTP Accessory Model")
-			.setCharacteristic(Characteristic.SerialNumber, "HTTP Accessory Serial Number");
-
-		var newService = null
-		switch (this.service) {
-			case "AccessoryInformation": newService = new Service.AccessoryInformation(this.name); break;
-			case "AirPurifier": newService = new Service.AirPurifier(this.name); break;
-			case "AirQualitySensor": newService = new Service.AirQualitySensor(this.name); break;
-			case "BatteryService": newService = new Service.BatteryService(this.name); break;
-			case "BridgeConfiguration": newService = new Service.BridgeConfiguration(this.name); break;
-			case "BridgingState": newService = new Service.BridgingState(this.name); break;
-			case "CameraControl": newService = new Service.CameraControl(this.name); break;
-			case "CameraRTPStreamManagement": newService = new Service.CameraRTPStreamManagement(this.name); break;
-			case "CarbonDioxideSensor": newService = new Service.CarbonDioxideSensor(this.name); break;
-			case "CarbonMonoxideSensor": newService = new Service.CarbonMonoxideSensor(this.name); break;
-			case "ContactSensor": newService = new Service.ContactSensor(this.name); break;
-			case "Door": newService = new Service.Door(this.name); break;
-			case "Doorbell": newService = new Service.Doorbell(this.name); break;
-			case "Fan": newService = new Service.Fan(this.name); break;
-			case "Fanv2": newService = new Service.Fanv2(this.name); break;
-			case "FilterMaintenance": newService = new Service.FilterMaintenance(this.name); break;
-			case "Faucet": newService = new Service.Faucet(this.name); break;
-			case "GarageDoorOpener": newService = new Service.GarageDoorOpener(this.name); break;
-			case "HeaterCooler": newService = new Service.HeaterCooler(this.name); break;
-			case "HumidifierDehumidifier": newService = new Service.HumidifierDehumidifier(this.name); break;
-			case "HumiditySensor": newService = new Service.HumiditySensor(this.name); break;
-			case "IrrigationSystem": newService = new Service.IrrigationSystem(this.name); break;
-			case "LeakSensor": newService = new Service.LeakSensor(this.name); break;
-			case "LightSensor": newService = new Service.LightSensor(this.name); break;
-			case "Lightbulb": newService = new Service.Lightbulb(this.name); break;
-			case "LockManagement": newService = new Service.LockManagement(this.name); break;
-			case "LockMechanism": newService = new Service.LockMechanism(this.name); break;
-			case "Microphone": newService = new Service.Microphone(this.name); break;
-			case "MotionSensor": newService = new Service.MotionSensor(this.name); break;
-			case "OccupancySensor": newService = new Service.OccupancySensor(this.name); break;
-			case "Outlet": newService = new Service.Outlet(this.name); break;
-			case "Pairing": newService = new Service.Pairing(this.name); break;
-			case "ProtocolInformation": newService = new Service.ProtocolInformation(this.name); break;
-			case "Relay": newService = new Service.Relay(this.name); break;
-			case "SecuritySystem": newService = new Service.SecuritySystem(this.name); break;
-			case "SecuritySystem": newService = new Service.SecuritySystem(this.name); break;
-			case "Slat": newService = new Service.Slat(this.name); break;
-			case "Speaker": newService = new Service.Speaker(this.name); break;
-			case "StatefulProgrammableSwitch": newService = new Service.StatefulProgrammableSwitch(this.name); break;
-			case "StatelessProgrammableSwitch": newService = new Service.StatelessProgrammableSwitch(this.name); break;
-			case "Switch": newService = new Service.Switch(this.name); break;
-			case "TemperatureSensor": newService = new Service.TemperatureSensor(this.name); break;
-			case "Thermostat": newService = new Service.Thermostat(this.name); break;
-			case "TimeInformation": newService = new Service.TimeInformation(this.name); break;
-			case "TunneledBTLEAccessoryService": newService = new Service.TunneledBTLEAccessoryService(this.name); break;
-			case "Valve": newService = new Service.Valve(this.name); break;
-			case "Window": newService = new Service.Window(this.name); break;
-			case "WindowCovering": newService = new Service.WindowCovering(this.name); break;
-			default: newService = null
 		}
 
-		var counters = [];
-		var optionCounters = [];
+		if (typeof Service[service.type] == 'function') {
+			newService = new Service[service.type](service.name);
 
-
-		for (var characteristicIndex in newService.characteristics) 
-		{
-			var characteristic = newService.characteristics[characteristicIndex];
-			var compactName = characteristic.displayName.replace(/\s/g, '');
-			counters[characteristicIndex] = makeHelper(characteristic);
-			characteristic.on('get', counters[characteristicIndex].getter.bind(this))
-			characteristic.on('set', counters[characteristicIndex].setter.bind(this));
-		}
-
-		for (var characteristicIndex in newService.optionalCharacteristics) 
-		{
-			var characteristic = newService.optionalCharacteristics[characteristicIndex];
-			var compactName = characteristic.displayName.replace(/\s/g, '');
-		
-			if(this.optionCharacteristic.indexOf(compactName) == -1)
+			for (var characteristicIndex in newService.characteristics) 
 			{
-				continue;
+				var characteristic = newService.characteristics[characteristicIndex];
+				var compactName = characteristic.displayName.replace(/\s/g, '');
+
+				var helper = makeHelper(characteristic);
+				if(compactName in service.characteristic)
+					characteristic.setValue(service.characteristic[compactName]);
+				characteristic.on('get', helper.getter.bind(this))
+				characteristic.on('set', helper.setter.bind(this));
 			}
 
-			optionCounters[characteristicIndex] = makeHelper(characteristic);
-			characteristic.on('get', optionCounters[characteristicIndex].getter.bind(this))
-			characteristic.on('set', optionCounters[characteristicIndex].setter.bind(this));
+			for (var characteristicIndex in newService.optionalCharacteristics) 
+			{
+				var characteristic = newService.optionalCharacteristics[characteristicIndex];
+				var compactName = characteristic.displayName.replace(/\s/g, '');
 
-			newService.addCharacteristic(characteristic);
+				if ((service.optionCharacteristic instanceof Array) && service.optionCharacteristic.indexOf(compactName) != -1) {
+					var helper = makeHelper(characteristic);
+					if(compactName in service.characteristic)
+						characteristic.setValue(service.characteristic[compactName]);
+					characteristic.on('get', helper.getter.bind(this))
+					characteristic.on('set', helper.setter.bind(this));
+
+					newService.addCharacteristic(characteristic);
+				}
+			}
 		}
-	
+
 		function makeHelper(characteristic) {
 			return {
 				getter: function (callback) {
 					var actionName = "get" + characteristic.displayName.replace(/\s/g, '');
-					var action = this.urls[actionName];
-					if (this.forceRefreshDelay == 0 ) { 
-						getDispatch(function(error,data){
-							this.enableSet = false;
-							this.state[actionName] = data;
+					var action = actions[actionName];
+					var refreshDelay = service.forceRefreshDelay || this.forceRefreshDelay || 0;
+					if (refreshDelay == 0 ) { 
+						this.getDispatch(function(error, data) {
+							enableSet = false;
 							characteristic.setValue(data);
-							this.enableSet = true;
-							callback(error,data);
-						}.bind(this), action); 
-					} 
-					else {
+							enableSet = true;
+							callback(error, data);
+						}, action); 
+					} else {
 						
-						if (typeof this.statusEmitters[actionName] != "undefined") 
-							this.statusEmitters[actionName].interval.clear();
+						if (typeof statusEmitters[actionName] != "undefined") 
+							statusEmitters[actionName].interval.clear();
 
-						this.statusEmitters[actionName] = pollingtoevent(function (done) {
+						statusEmitters[actionName] = pollingtoevent(function (done) {
 							
-							getDispatch(done,action);
+							this.getDispatch(done, action);
 
 						}.bind(this), { 
 							longpolling: true, 
-							interval: this.forceRefreshDelay * 1000, 
+							interval: refreshDelay * 1000, 
 							longpollEventName: actionName 
 						});
 
-						this.statusEmitters[actionName].on(actionName, function (data) 
+						statusEmitters[actionName].on(actionName, function (data) 
 						{
-						    this.enableSet = false;
-							this.state[actionName] = data;
+						    enableSet = false;
 							characteristic.setValue(data);
-							this.enableSet = true;
+							enableSet = true;
 						
 							if(callback){
-								callback(null, this.state[actionName]);
+								callback(null, data);
 							}
 							// just call it once, multiple calls not allowed
 							callback = null;
-						}.bind(this));
+						});
 
 						
 					}
 				},
-				setter: function (value, callback) { setDispatch(value, callback, characteristic) }
+				setter: function (value, callback) {
+					if(enableSet == false) {
+						callback();
+					} else {
+						var actionName = "set" + characteristic.displayName.replace(/\s/g, '')
+						this.debugLog("setDispatch:actionName:value: ", actionName, value); 
+						var action = actions[actionName];
+						this.setDispatch(value, callback, action);
+					}
+				}
 			};
 		}
-		return [informationService, newService];
+
+		return newService;
+	},
+
+	getDispatch: function (callback, action) {
+		if (!action) {
+			callback(null);
+
+		} else if (!action.url) {
+			callback(null, action.body);
+
+		} else {
+			this.httpRequest(action.url, action.body, action.httpMethod, function(error, response, responseBody) {
+				if (error) {
+					this.log("Get characteristic value failed: %s", error.message);
+					callback(null);
+				} else {
+					var state = responseBody;
+					state = this.applyMappers(action.mappers, state);
+					if (state == "inconclusive" && action.inconclusive) {
+						this.getDispatch(callback, action.inconclusive);
+					} else {
+						callback(null, state);
+					}
+				}
+			}.bind(this));
+		}
+	},
+
+	setDispatch: function (value, callback, action) {
+		if (!action || !action.url) {
+			callback(null);
+		} else {
+
+			var body = action.body;
+			var mappedValue = this.applyMappers(action.mappers, value);
+			var url = eval('`'+action.url+'`').replace(/{value}/gi, mappedValue);
+			if (body) {
+				body = eval('`'+body+'`').replace(/{value}/gi, mappedValue);
+			}
+
+			this.httpRequest(url, body, action.httpMethod, function(error, response, responseBody) {
+				if (error) {
+					this.log("Set characteristic value failed: %s", error.message);
+					callback(null);
+				} else {
+					callback(null, value);
+				}
+			}.bind(this));
+		}
+},
+
+	getServices: function () {
+		var informationService;
+		var services = this.services.map(function(m) {
+			var svc = this.createService(m);
+			if(m.type == "AccessoryInformation") {
+				informationService = svc;
+			}
+			return svc;
+		}.bind(this));
+
+		if (!informationService) {
+			informationService = new Service.AccessoryInformation();
+
+			informationService
+				.setCharacteristic(Characteristic.Manufacturer, "Custom Manufacturer")
+				.setCharacteristic(Characteristic.Model, "HTTP Accessory Model")
+				.setCharacteristic(Characteristic.SerialNumber, "HTTP Accessory Serial Number")
+				.setCharacteristic(Characteristic.FirmwareRevision, "1.0");
+
+			services.unshift(informationService);
+		}
+
+		return services;
 	}
 };
